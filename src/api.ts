@@ -75,7 +75,9 @@ export function createApiCall(cfg: Config): ApiCallFn {
     if (!response.ok) {
       const text = await response.text();
       const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text;
-      throw new Error(`API error ${response.status}: ${truncated} (RequestId: ${requestId})`);
+      // Log full details to stderr; return sanitized message to client
+      console.error(`[Direct API] ${response.status} ${service}.${method} RequestId:${requestId} — ${truncated}`);
+      throw new Error(`API error ${response.status} on ${service}.${method} (RequestId: ${requestId})`);
     }
 
     let data: unknown;
@@ -85,11 +87,16 @@ export function createApiCall(cfg: Config): ApiCallFn {
       throw new Error(`Non-JSON response for ${service}.${method} (RequestId: ${requestId})`);
     }
 
-    const meta = { _meta: { units, requestId, sandbox: cfg.sandbox } };
+    const meta = { units, requestId, sandbox: cfg.sandbox };
     if (typeof data === "object" && data !== null && !Array.isArray(data)) {
-      return { ...data, ...meta };
+      const obj = data as Record<string, unknown>;
+      // Avoid overwriting API response keys — nest metadata under a safe key
+      if ("_meta" in obj) {
+        return { ...obj, _directMeta: meta };
+      }
+      return { ...obj, _meta: meta };
     }
-    return { result: data, ...meta };
+    return { result: data, _meta: meta };
   };
 }
 
@@ -148,16 +155,21 @@ export function createReportsCall(cfg: Config): ReportsCallFn {
 
       if (response.status === 201 || response.status === 202) {
         await response.text(); // consume body to prevent leak
-        const raw = parseInt(response.headers.get("retryIn") ?? "5", 10);
-        const delay = Number.isNaN(raw) ? 5 : Math.max(1, Math.min(raw, 300));
-        await new Promise((r) => setTimeout(r, delay * 1000));
+        const header = response.headers.get("retryIn") ?? "";
+        const parsed = header !== "" ? Number(header) : NaN;
+        const baseSec = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 300) : 5;
+        // Add jitter (±20%) to prevent thundering herd on concurrent retries
+        const jitter = baseSec * (0.8 + Math.random() * 0.4);
+        await new Promise((r) => setTimeout(r, jitter * 1000));
         attempt++;
         continue;
       }
 
       const text = await response.text();
       const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text;
-      throw new Error(`Reports API error ${response.status}: ${truncated}`);
+      // Log full details to stderr; return sanitized message to client
+      console.error(`[Direct Reports] ${response.status} — ${truncated}`);
+      throw new Error(`Reports API error ${response.status}. Check server logs for details.`);
     }
 
     throw new Error("Report generation timed out after max attempts");
@@ -198,8 +210,8 @@ export function createCtx(server: McpServer, api: ApiCallFn, reports: ReportsCal
         return { content: [{ type: "text" as const, text: "Error: empty JSON input." }] };
       }
       let parsed: unknown;
-      try { parsed = JSON.parse(data); } catch (e) {
-        return { content: [{ type: "text" as const, text: `Error: invalid JSON — ${e instanceof Error ? e.message : e}` }] };
+      try { parsed = JSON.parse(data); } catch {
+        return { content: [{ type: "text" as const, text: "Error: invalid JSON input. Ensure value is valid JSON." }] };
       }
       const result = await api(service, method, { [param]: parsed });
       return formatResult(result);

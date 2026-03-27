@@ -26,6 +26,9 @@ export function register(ctx: Ctx): void {
       dateTo: z.string().optional().describe("YYYY-MM-DD (required if CUSTOM_DATE)"),
     },
   }, async ({ reportType, dateRangeType, fieldNames, reportName, dateFrom, dateTo }) => {
+    if (dateRangeType === "CUSTOM_DATE" && (!dateFrom || !dateTo)) {
+      return { content: [{ type: "text" as const, text: "Error: dateFrom and dateTo are required when dateRangeType is CUSTOM_DATE." }] };
+    }
     const result = await ctx.reports({ reportName, reportType, dateRangeType, fieldNames, dateFrom, dateTo });
     return { content: [{ type: "text" as const, text: result }] };
   });
